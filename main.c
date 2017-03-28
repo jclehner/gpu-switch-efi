@@ -150,11 +150,62 @@ static BOOLEAN DumpEfiVars(VOID)
 	return ret;
 }
 
+static EFI_STATUS Exit(EFI_HANDLE imageHandle, EFI_STATUS status)
+{
+	return uefi_call_wrapper(BS->Exit, 4, imageHandle, status, 0, NULL);
+}
+
+static EFI_STATUS PrintUsageAndExit(EFI_HANDLE imageHandle, BOOLEAN error)
+{
+	Print(
+			L"Usage: gpu-switch.efi [options]\n"
+			L"\n"
+			L"Options:\n"
+			L" -v     Verbose operation\n"
+			L" -p     Dump relevant efi variables\n"
+			L" -i     Force integrated GPU on next boot\n"
+			L" -d     Force dedicated GPU on next boot\n"
+			L"\n"
+			L"Copyright (C) 2017 Joseph C. Lehner\n"
+			L"Licensed under the GNU GPLv3; source:\n"
+			L"https://github.com/jclehner/gpu-switch-efi\n"
+			L"\n");
+
+	return Exit(imageHandle, error ? EFI_INVALID_PARAMETER : EFI_SUCCESS);
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE *systemTable)
 {
-	EFI_STATUS status;
+	CHAR16 **argv;
+	INTN i, argc;
+	BOOLEAN dump = FALSE;
+	UINT32 gpu = ~0;
+	EFI_STATUS status = EFI_INVALID_PARAMETER;
 
 	InitializeLib(imageHandle, systemTable);
-	status = DumpEfiVars();
-	return uefi_call_wrapper(BS->Exit, 4, imageHandle, status, 0, NULL);
+	argc = GetShellArgcArgv(imageHandle, &argv);
+
+	for (i = 0; i < argc; ++i) {
+		if (!StrCmp(argv[i], L"-v")) {
+			verbose = TRUE;
+		} else if (!StrCmp(argv[i], L"-h")) {
+			return PrintUsageAndExit(imageHandle, FALSE);
+		} else if (!StrCmp(argv[i], L"-i")) {
+			gpu = GPU_INTERNAL;
+		} else if (!StrCmp(argv[i], L"-d")) {
+			gpu = GPU_EXTERNAL;
+		} else if (!StrCmp(argv[i], L"-p")) {
+			dump = TRUE;
+		}
+	}
+
+	if (!dump && (gpu == ~0)) {
+		return PrintUsageAndExit(imageHandle, TRUE);
+	} else if (dump) {
+		status = DumpEfiVars();
+	} else {
+		status = SetNextBootGpu(gpu);
+	}
+
+	return Exit(imageHandle, status);
 }
