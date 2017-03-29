@@ -11,9 +11,9 @@ EFI_CRT_OBJS    = $(EFILIB)/crt0-efi-$(ARCH).o
 EFI_LDS         = $(EFILIB)/elf_$(ARCH)_efi.lds
 
 CFLAGS          = $(EFIINCS) -fno-stack-protector -fpic \
-				  -fshort-wchar -mno-red-zone -Wall
+				  -fshort-wchar -mno-red-zone -Wextra -DVERSION="L\"$(shell git describe --always)\""
 ifeq ($(ARCH),x86_64)
-	CFLAGS += -DEFIX64 -DEFI_FUNCTION_WRAPPER -m64
+	CFLAGS += -DEFI_FUNCTION_WRAPPER -m64
 endif
 
 LDFLAGS         = -nostdlib -znocombreloc -T $(EFI_LDS) -shared \
@@ -22,7 +22,7 @@ LDFLAGS         = -nostdlib -znocombreloc -T $(EFI_LDS) -shared \
 all: $(TARGET)
 
 clean:
-	rm -f $(OBJS)
+	rm -f $(OBJS) $(TARGET) gpu-switch.so
 
 gpu-switch.so: $(OBJS)
 	ld $(LDFLAGS) $(OBJS) -o $@ -lefi -lgnuefi

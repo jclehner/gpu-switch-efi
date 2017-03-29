@@ -20,8 +20,16 @@
 #include <efi.h>
 #include <efilib.h>
 
-#define GPU_EXTERNAL 0
+#ifndef VERSION
+#define VERSION L"(unknown)"
+#endif
+
+#define GPU_DEDICATED 0
 #define GPU_INTERNAL 1
+#define GPU_NAME(n) ((n) ? "internal" : "dedicated")
+
+#define VAR_ACCESS_BS_RT (EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
+#define VAR_ATTR_MASK (VAR_ACCESS_BS_RT | EFI_VARIABLE_NON_VOLATILE)
 
 #define G2P_NAME L"gpu-power-prefs"
 #define GP_NAME L"gpu-policy"
@@ -36,16 +44,20 @@ static EFI_GUID g2pGuid =
 static EFI_GUID gpGuid =
 	{ 0x7c436110, 0xab2a, 0x4bbb, { 0xa8, 0x80, 0xfe, 0x41, 0x99, 0x5c, 0x9f, 0x82 }};
 
-static BOOLEAN verbose = TRUE;
+static UINT32 verbosity = 0;
 
 static BOOLEAN GetEfiVar(EFI_GUID *guid, CHAR16 *name, CHAR8 *buf, UINTN *len, UINT32 *attrs)
 {
 	EFI_STATUS status;
 
-	status = uefi_call_wrapper(RT->GetVariable, 5, name, guid, attrs, len, *buf);
+	if (verbosity > 2) {
+		Print(L"%a(%g, %s, ..., %ld, %02x)\n", __func__, guid, name, *len, attrs ? *attrs : 0);
+	}
+
+	status = uefi_call_wrapper(RT->GetVariable, 5, name, guid, attrs, len, buf);
 	if (!EFI_ERROR(status)) {
-		return len > 0;
-	} else if (verbose && status != EFI_NOT_FOUND) {
+		return *len > 0;
+	} else if (verbosity && status != EFI_NOT_FOUND) {
 		Print(L"%a: %s: %r\n", __func__, name, status);
 	}
 
@@ -55,15 +67,20 @@ static BOOLEAN GetEfiVar(EFI_GUID *guid, CHAR16 *name, CHAR8 *buf, UINTN *len, U
 static BOOLEAN SetEfiVar(EFI_GUID *guid, CHAR16 *name, CHAR8 *buf, UINTN len, UINT32 attrs)
 {
 	EFI_STATUS status;
-	UINT32 access = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
 
-	if (!(attrs & ~access)) {
-		attrs |= access;
+	if (verbosity > 2) {
+		Print(L"%a(%g, %s, ..., %ld, %02x)\n", __func__, guid, name, len, attrs);
+	}
+
+	attrs &= VAR_ATTR_MASK;
+
+	if (!(attrs & ~VAR_ACCESS_BS_RT)) {
+		attrs |= VAR_ACCESS_BS_RT;
 	}
 
 	status = uefi_call_wrapper(RT->SetVariable, 5, name, guid, attrs, len, buf);
 	if (EFI_ERROR(status)) {
-		if (verbose) {
+		if (verbosity) {
 			Print(L"%a: %s: %r\n", __func__, name, status);
 		}
 		return FALSE;
@@ -72,12 +89,16 @@ static BOOLEAN SetEfiVar(EFI_GUID *guid, CHAR16 *name, CHAR8 *buf, UINTN len, UI
 	return TRUE;
 }
 
-typedef BOOLEAN (*EditEfiVarCallback)(CHAR8 *buf, UINTN len, VOID *arg);
+typedef BOOLEAN (*EditEfiVarCallback)(CHAR16 *name, CHAR8 *buf, UINTN len, VOID *arg);
 static BOOLEAN EditEfiVar(EFI_GUID *guid, CHAR16 *name, EditEfiVarCallback cb, VOID *arg)
 {
 	CHAR8 buf[1024];
 	UINTN len;
 	UINT32 attrs;
+
+	if (verbosity > 2) {
+		Print(L"%a(%g, %s, ..., ...)\n", __func__, guid, name);
+	}
 
 	if (!cb) {
 		return FALSE;
@@ -90,34 +111,49 @@ static BOOLEAN EditEfiVar(EFI_GUID *guid, CHAR16 *name, EditEfiVarCallback cb, V
 		return FALSE;
 	}
 
-	if (!cb(buf, len, arg)) {
+	if (!cb(name, buf, len, arg)) {
 		return FALSE;
 	}
 
 	return SetEfiVar(guid, name, buf, len, attrs);
 }
 
-static BOOLEAN EditGpuPowerPrefsAndPolicy(CHAR8 *buf, UINTN len, VOID *arg)
+static BOOLEAN EditGpuPowerPrefsAndPolicy(CHAR16 *name, CHAR8 *buf, UINTN len, VOID *arg)
 {
+	if ((!StrCmp(name, L"gpu-power-prefs") && len != 4)
+			|| (!StrCmp(name, L"gpu-policy") && len != 1))
+	{
+		if (verbosity) {
+			Print(L"%a: unexpected length %ld for %s\n", __func__, len, name);
+		}
+
+		return FALSE;
+	}
+
+	if (verbosity > 2) {
+		Print(L"%a(%s, ..., %ld, %a)\n", __func__, name, len, *(BOOLEAN*)arg ? "TRUE" : "FALSE");
+	}
+
 	buf[0] = (*(BOOLEAN*)arg) ? 1 : 0;
 	return TRUE;
 }
 
 static BOOLEAN SetNextBootGpu(BOOLEAN internal)
 {
-	BOOLEAN err = FALSE;
+	BOOLEAN ret = FALSE;
 
-	err |= !EditEfiVar(&g2pGuid, G2P_NAME, &EditGpuPowerPrefsAndPolicy, &internal);
-	err |= !EditEfiVar(&gpGuid, GP_NAME, &EditGpuPowerPrefsAndPolicy, &internal);
-	err |= !EditEfiVar(&appleNvGuid, GSCRS_NAME, &EditGpuPowerPrefsAndPolicy, &internal);
+	ret |= EditEfiVar(&g2pGuid, G2P_NAME, &EditGpuPowerPrefsAndPolicy, &internal);
+	ret |= EditEfiVar(&gpGuid, GP_NAME, &EditGpuPowerPrefsAndPolicy, &internal);
 
-	return !err;
+	return ret;
 }
 
 static BOOLEAN DumpEfiVar(EFI_GUID *guid, CHAR16 *name)
 {
 	CHAR8 buf[1024];
 	UINTN i, len = sizeof(buf);
+
+	ZeroMem(buf, len);
 
 	if (!GetEfiVar(guid, name, buf, &len, NULL)) {
 		return FALSE;
@@ -126,7 +162,7 @@ static BOOLEAN DumpEfiVar(EFI_GUID *guid, CHAR16 *name)
 	Print(L"%s: ", name, &guid);
 
 	for (i = 0; i < len; ++i) {
-		Print(L" %02x", buf[i]);
+		Print(L" %02x", buf[i] & 0xff);
 	}
 
 	Print(L"\n");
@@ -139,12 +175,12 @@ static BOOLEAN DumpEfiVars(VOID)
 {
 	BOOLEAN ret = FALSE;
 
+	ret |= DumpEfiVar(&appleNvGuid, GSCRS_NAME);
 	ret |= DumpEfiVar(&g2pGuid, G2P_NAME);
 	ret |= DumpEfiVar(&gpGuid, GP_NAME);
-	ret |= DumpEfiVar(&appleNvGuid, GSCRS_NAME);
 
 	if (!ret) {
-		Print(L"No relevant EFI variables found.\n");
+		Print(L"Nothing to dump.\n");
 	}
 
 	return ret;
@@ -162,14 +198,14 @@ static EFI_STATUS PrintUsageAndExit(EFI_HANDLE imageHandle, BOOLEAN error)
 			L"\n"
 			L"Options:\n"
 			L" -v     Verbose operation\n"
-			L" -p     Dump relevant efi variables\n"
+			L" -p     Dump important EFI variables\n"
 			L" -i     Force integrated GPU on next boot\n"
 			L" -d     Force dedicated GPU on next boot\n"
 			L"\n"
+			L"gpu-switch.efi " VERSION "\n"
 			L"Copyright (C) 2017 Joseph C. Lehner\n"
 			L"Licensed under the GNU GPLv3; source:\n"
-			L"https://github.com/jclehner/gpu-switch-efi\n"
-			L"\n");
+			L"https://github.com/jclehner/gpu-switch-efi\n");
 
 	return Exit(imageHandle, error ? EFI_INVALID_PARAMETER : EFI_SUCCESS);
 }
@@ -187,24 +223,30 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE *systemTable
 
 	for (i = 0; i < argc; ++i) {
 		if (!StrCmp(argv[i], L"-v")) {
-			verbose = TRUE;
+			++verbosity;
 		} else if (!StrCmp(argv[i], L"-h")) {
 			return PrintUsageAndExit(imageHandle, FALSE);
 		} else if (!StrCmp(argv[i], L"-i")) {
 			gpu = GPU_INTERNAL;
 		} else if (!StrCmp(argv[i], L"-d")) {
-			gpu = GPU_EXTERNAL;
+			gpu = GPU_DEDICATED;
 		} else if (!StrCmp(argv[i], L"-p")) {
 			dump = TRUE;
 		}
 	}
 
-	if (!dump && (gpu == ~0)) {
+	if (!dump && (gpu == ~0U)) {
 		return PrintUsageAndExit(imageHandle, TRUE);
 	} else if (dump) {
-		status = DumpEfiVars();
+		status = DumpEfiVars() ? EFI_SUCCESS : EFI_NOT_FOUND;
 	} else {
-		status = SetNextBootGpu(gpu);
+		if (SetNextBootGpu(gpu)) {
+			Print(L"Successfully switched to %a GPU\n", GPU_NAME(gpu));
+			status = EFI_SUCCESS;
+		} else {
+			Print(L"Failed to switch to %a GPU\n", GPU_NAME(gpu));
+			status = EFI_NOT_FOUND;
+		}
 	}
 
 	return Exit(imageHandle, status);
